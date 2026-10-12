@@ -1,0 +1,12 @@
+openai
+python-dotenv
+streamlit
+wikipedia-api
+colorama
+tiktoken
+tavily-python
+pre-commit
+black
+flake8
+isort
+requests
