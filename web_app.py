@@ -138,7 +138,8 @@ class WebApp:
 
             # Get response from the agent
             try:
-                result_messages = self.agent.execute(user_input)
+                with st.spinner("Agent is working with tools..."):
+                    result_messages = self.agent.execute(user_input)
                 response_data = [{"role": msg.role, "content": msg.content} for msg in result_messages]
 
                 # Process messages into sidebar and main chat

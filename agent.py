@@ -351,46 +351,67 @@ class ReActAgent:
 
 
     def execute_action(self, tool_name, query):
+        """Execute a tool once per unique query and keep observations concise."""
+        key = (tool_name, " ".join(str(query).casefold().split()))
+        cache = getattr(self, "_tool_observations", None)
+        if cache is None:
+            cache = self._tool_observations = {}
 
-        """Act on the response by calling the appropriate tool."""
+        # One forced finalization attempt is allowed. Never recurse endlessly.
+        if getattr(self, "_force_final", False):
+            text = "\n".join(cache.values())[:2400]
+            self.add_message(
+                "assistant",
+                "Final Answer: The agent could not reliably finish its summary. "
+                "Here are the available tool results (check the source URLs):\n" + text,
+            )
+            return
+
+        if key in cache:
+            self.add_message(
+                "system",
+                "Observation: Duplicate tool call blocked. The earlier result was: "
+                + cache[key]
+                + "\nThe current question already has evidence. "
+                "Give the Final Answer now; do not call tools again.",
+            )
+            self._force_final = True
+            self.think()
+            return
 
         tool = self.tools.get(tool_name)
-
-
-
-        if tool:
-
-            result = tool.run(query)
-
-            observation = f"Observation: {tool_name} tool output: {result}"
-
-
-
-            self.add_message("system", observation)
-
-
-
-            # Print the observation immediately
-
-            print(f"{Fore.CYAN}\n[SYSTEM]:{Style.RESET_ALL} {observation}\n")
-
-
-
-            # Continue thinking after receiving observation
-
+        if tool is None:
+            self.add_message("system", f"Observation: Tool '{tool_name}' is unavailable.")
             self.think()
+            return
 
+        try:
+            result = tool.run(query)
+        except Exception as exc:
+            result = f"{type(exc).__name__}: {exc}"
+
+        # Tavily often returns long page excerpts. Keep titles, URLs and a
+        # short snippet so the LLM can still answer and attribute its sources.
+        if tool_name == "web_search" and isinstance(result, list):
+            compact = []
+            for item in result[:3]:
+                if not isinstance(item, dict):
+                    continue
+                compact.append({
+                    "title": str(item.get("title", ""))[:200],
+                    "content": " ".join(str(item.get("content", "")).split())[:800],
+                    "url": str(item.get("url", ""))[:350],
+                    **({"error": str(item["error"])[:250]} if "error" in item else {}),
+                })
+            result_text = json.dumps(compact, ensure_ascii=False)
         else:
+            result_text = str(result)[:2300]
 
-            error_msg = f"Error: Tool '{tool_name}' not found"
-
-            print(f"\n{Fore.RED}{error_msg}{Style.RESET_ALL}")
-
-            self.add_message("system", error_msg)
-
-            self.think()  # Continue processing other actions
-
-
+        observation = f"Observation: {tool_name} tool output: {result_text}"
+        cache[key] = observation
+        self.add_message("system", observation)
+        print(f"{Fore.CYAN}\n[SYSTEM]:{Style.RESET_ALL} {observation}\n")
+        self.think()
 
     def format_output(self, response):
 
@@ -452,6 +473,22 @@ class ReActAgent:
             "Never invent tool results. Do not include formatting tags, "
             "'Action:', 'PAUSE', or 'Thought:' in the JSON field values."
         )
+        instructions += (
+            "\nFINALIZATION IS IMPORTANT: After a successful tool Observation "
+            "that contains the requested answer, you MUST choose kind=final "
+            "immediately. For a single air-distance question, one successful "
+            "web_search is enough. Report the approximate distance and the "
+            "source URL from the Observation. Never repeat the same tool call "
+            "with the same input. For multi-part questions, only perform "
+            "actions needed for information not already observed. "
+            "Ignore unrelated long page excerpts. "
+        )
+        if getattr(self, "_force_final", False):
+            instructions += (
+                "\nSTOP SEARCHING. You already have tool results. "
+                "Your next answer MUST be kind=final with a concise answer "
+                "using only the observations, including any available URLs. "
+            )
         if self.old_chats_summary:
             instructions += "\nPrevious conversation summary:\n" + self.old_chats_summary
 
@@ -466,6 +503,10 @@ class ReActAgent:
             "required": ["kind", "tool_name", "tool_input", "answer"],
             "additionalProperties": False,
         }
+
+        if getattr(self, "_force_final", False):
+            schema["properties"]["kind"]["enum"] = ["final"]
+            schema["properties"]["tool_name"]["enum"] = ["none"]
 
         try:
             response = self.client.chat.completions.create(
@@ -693,6 +734,8 @@ class ReActAgent:
         """Execute a user query and return the full Agent response."""
 
         self.current_iteration = 0
+        self._tool_observations = {}
+        self._force_final = False
 
         self.add_message("user", query)
 
