@@ -1,4 +1,4 @@
-"""ReAct Agent for Groq with native tool calling and bounded multi-step execution.
+"""ReAct Agent for Google Gemini (OpenAI-compatible API) with native tool calling and bounded multi-step execution.
 
 Drop-in replacement for agent.py in ReAct-Agent-from-Scratch.
 Requires the existing tools/ and utils/ modules and dependencies in requirements.txt.
@@ -25,13 +25,13 @@ from utils.message import Message
 class ReActAgent:
     def __init__(self):
         load_dotenv(".env.local", override=True)
-        self.model = os.getenv("MODEL_NAME", "openai/gpt-oss-20b")
-        api_key = os.getenv("GROQ_API_KEY")
+        self.model = os.getenv("MODEL_NAME", "gemini-3.5-flash-lite")
+        api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            raise ValueError("GROQ_API_KEY is missing. Configure Streamlit Secrets.")
+            raise ValueError("GEMINI_API_KEY is missing. Put it in .env.local for local use, or Streamlit Secrets when deploying.")
         self.client = OpenAI(
             api_key=api_key,
-            base_url="https://api.groq.com/openai/v1",
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
             timeout=25.0,
             max_retries=1,
         )
@@ -255,7 +255,7 @@ class ReActAgent:
                 kwargs: dict[str, Any] = {
                     "model": self.model,
                     "messages": llm_messages,
-                    "max_tokens": 850,
+                    "max_tokens": 2048,
                     "temperature": 0.1,
                 }
                 if tools_schema:
@@ -263,37 +263,21 @@ class ReActAgent:
                 completion = self.client.chat.completions.create(**kwargs)
                 msg = completion.choices[0].message
             except BadRequestError as exc:
-                body = exc.body if isinstance(exc.body, dict) else {}
-                details = body.get("error", body)
-                if not isinstance(details, dict) or details.get("code") != "tool_use_failed":
-                    stop_reason = f"Groq rejected the request ({getattr(exc, 'status_code', '?')})"
-                    break
-                try:
-                    failed = details.get("failed_generation")
-                    attempted = json.loads(failed) if isinstance(failed, str) else failed
-                    tool_name = attempted["name"]
-                    args = attempted["arguments"]
-                    output = self._run_tool(tool_name, args, cache, records)
-                    llm_messages.append({"role": "system", "content": f"Tool call executed by application: {tool_name}. Observation: {output}"})
-                    calls += 1
-                    continue
-                except (ValueError, TypeError, KeyError, json.JSONDecodeError):
-                    stop_reason = "Groq returned an unsupported tool call"
-                    break
+                stop_reason = f"Gemini returned HTTP {getattr(exc, 'status_code', '?')}. Check the selected model and tool schema."
+                break
             except Exception as exc:
                 stop_reason = f"model request failed: {type(exc).__name__}"
                 break
 
             tool_calls = getattr(msg, "tool_calls", None) or []
             if tool_calls:
-                llm_messages.append({
-                    "role": "assistant",
-                    "content": msg.content,
-                    "tool_calls": [
-                        {"id": c.id, "type": "function", "function": {"name": c.function.name, "arguments": c.function.arguments}}
-                        for c in tool_calls
-                    ],
-                })
+                assistant_payload = {"role": "assistant", "content": msg.content,
+                                     "tool_calls": [c.model_dump(exclude_none=True) for c in tool_calls]}
+                # Some Gemini models return auxiliary metadata needed when continuing a tool call.
+                extra_content = getattr(msg, "extra_content", None)
+                if extra_content:
+                    assistant_payload["extra_content"] = extra_content
+                llm_messages.append(assistant_payload)
                 for call in tool_calls:
                     if calls >= self.max_tool_calls:
                         break
